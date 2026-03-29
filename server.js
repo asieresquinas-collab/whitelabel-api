@@ -6,172 +6,217 @@ app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
 app.get('/api/ping', (req, res) => {
-  res.json({ status: 'ok', server: 'whitelabel-api', version: '1.1.0' });
+  res.json({ status: 'ok', server: 'whitelabel-api', version: '1.2.0' });
 });
 
 app.get('/', (req, res) => {
-  res.send('<h1>WhiteLabel API Server v1.1</h1><p>Endpoints: POST /api/ai-config | POST /api/proxy-image | GET /api/ping</p>');
+  res.send('<h1>WhiteLabel API Server v1.2</h1><p>POST /api/ai-config | POST /api/proxy-image | GET /api/ping</p>');
 });
 
 // === HELPER: download image as base64 ===
-async function downloadImageAsBase64(imageUrl) {
+async function downloadImageAsBase64(imageUrl, refererUrl) {
   try {
+    if (!imageUrl) return null;
+    if (imageUrl.startsWith('data:') && imageUrl.length > 200) return imageUrl;
+    if (imageUrl.startsWith('data:')) return null;
+    console.log('  DL: ' + imageUrl.substring(0, 150));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    const timeout = setTimeout(() => controller.abort(), 15000);
     const resp = await fetch(imageUrl, {
       signal: controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'Referer': refererUrl || imageUrl
+      }
     });
     clearTimeout(timeout);
-    if (!resp.ok) return null;
-    const contentType = resp.headers.get('content-type') || 'image/png';
-    const arrayBuffer = await resp.arrayBuffer();
-    const base64 = Buffer.from(arrayBuffer).toString('base64');
-    return 'data:' + contentType + ';base64,' + base64;
-  } catch (e) {
-    console.warn('Could not download image:', imageUrl, e.message);
-    return null;
-  }
+    if (!resp.ok) { console.warn('  FAIL HTTP ' + resp.status); return null; }
+    const ct = resp.headers.get('content-type') || 'image/png';
+    const ab = await resp.arrayBuffer();
+    if (ab.byteLength < 100) { console.warn('  FAIL too small'); return null; }
+    console.log('  OK ' + ct + ' ' + Math.round(ab.byteLength/1024) + 'KB');
+    return 'data:' + ct + ';base64,' + Buffer.from(ab).toString('base64');
+  } catch (e) { console.warn('  FAIL ' + e.message); return null; }
 }
 
-// === PROXY IMAGE ENDPOINT ===
+function resolveUrl(src, baseUrl) {
+  if (!src) return '';
+  if (src.startsWith('data:')) return src;
+  if (src.startsWith('//')) return 'https:' + src;
+  if (src.startsWith('/')) return baseUrl + src;
+  if (src.startsWith('http')) return src;
+  return baseUrl + '/' + src;
+}
+
 app.post('/api/proxy-image', async (req, res) => {
   try {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'URL requerida' });
-    const base64 = await downloadImageAsBase64(url);
-    if (!base64) return res.status(404).json({ error: 'No se pudo descargar la imagen' });
+    const base64 = await downloadImageAsBase64(url, url);
+    if (!base64) return res.status(404).json({ error: 'No se pudo descargar' });
     res.json({ base64 });
-  } catch (err) {
-    res.status(500).json({ error: 'Error interno', details: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// === AI CONFIG ENDPOINT ===
+// === AI CONFIG ===
 app.post('/api/ai-config', async (req, res) => {
   try {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'URL requerida' });
     const OPENAI_KEY = process.env.OPENAI_API_KEY;
     if (!OPENAI_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY no configurada' });
-    console.log('/api/ai-config - Analizando: ' + url);
-    let baseUrl = url;
-    try {
-      const u = new URL(url.startsWith('http') ? url : 'https://' + url);
-      baseUrl = u.origin;
-    } catch(e) {}
+    console.log('\n=== AI-CONFIG: ' + url + ' ===');
 
+    const fullUrl = url.startsWith('http') ? url : 'https://' + url;
+    let baseUrl = fullUrl;
+    try { baseUrl = new URL(fullUrl).origin; } catch(e) {}
+
+    // 1. Download page
     let rawHtml = '', pageText = '';
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-      const resp = await fetch(url.startsWith('http') ? url : 'https://' + url, {
-        signal: controller.signal,
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 15000);
+      const r = await fetch(fullUrl, { signal: ctrl.signal, redirect: 'follow',
         headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
       });
-      clearTimeout(timeout);
-      rawHtml = await resp.text();
-      pageText = rawHtml
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 8000);
-    } catch (e) {
-      pageText = 'No se pudo acceder a ' + url;
-    }
+      clearTimeout(to);
+      rawHtml = await r.text();
+      console.log('HTML: ' + rawHtml.length + ' chars');
+      pageText = rawHtml.replace(/<script[^>]*>[\s\S]*?<\/script>/gi,'').replace(/<style[^>]*>[\s\S]*?<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,8000);
+    } catch(e) { console.warn('Page fetch failed: ' + e.message); pageText = 'No se pudo acceder a ' + url; }
 
-    let images = [], logoUrl = '';
+    // 2. Extract ALL images: <img> tags + CSS background-images + data-bg
+    let allImgs = [], logoUrl = '', bgImages = [];
     if (rawHtml) {
-      const re = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+      // --- IMG tags (with data-src, data-lazy-src, srcset support) ---
+      const imgRe = /<img[^>]*>/gi;
       let m;
-      const all = [];
-      while ((m = re.exec(rawHtml)) !== null) {
-        let s = m[1];
-        if (s.startsWith('//')) s = 'https:' + s;
-        else if (s.startsWith('/')) s = baseUrl + s;
-        else if (!s.startsWith('http') && !s.startsWith('data:')) s = baseUrl + '/' + s;
-        if (s.includes('pixel') || s.includes('track') || s.includes('1x1')) continue;
-        if (s.startsWith('data:') && s.length < 200) continue;
-        const alt = (m[0].match(/alt=["']([^"']*)["']/i) || [])[1] || '';
-        const cls = (m[0].match(/class=["']([^"']*)["']/i) || [])[1] || '';
-        all.push({ src: s, alt: alt, class: cls });
+      while ((m = imgRe.exec(rawHtml)) !== null) {
+        const tag = m[0];
+        const src = (tag.match(/\bsrc=["']([^"']+)["']/i)||[])[1]||'';
+        const dataSrc = (tag.match(/\bdata-src=["']([^"']+)["']/i)||[])[1]||'';
+        const dataLazy = (tag.match(/\bdata-lazy-src=["']([^"']+)["']/i)||[])[1]||'';
+        const dataOrig = (tag.match(/\bdata-original=["']([^"']+)["']/i)||[])[1]||'';
+        const srcset = (tag.match(/\bsrcset=["']([^"']+)["']/i)||[])[1]||'';
+        const dataSrcset = (tag.match(/\bdata-srcset=["']([^"']+)["']/i)||[])[1]||'';
+        // Pick best source: prefer data-src over placeholder src
+        let best = src;
+        if (!best || best.includes('data:image/svg') || best.includes('placeholder') || best.includes('blank.gif')) {
+          best = dataSrc || dataLazy || dataOrig || '';
+        }
+        if (!best && (srcset || dataSrcset)) {
+          const ss = (dataSrcset || srcset).split(',')[0].trim().split(' ')[0];
+          if (ss) best = ss;
+        }
+        if (!best) continue;
+        best = resolveUrl(best, baseUrl);
+        if (best.includes('pixel') || best.includes('track') || best.includes('1x1')) continue;
+        if (best.startsWith('data:') && best.length < 200) continue;
+        const alt = (tag.match(/\balt=["']([^"']*)["']/i)||[])[1]||'';
+        const cls = (tag.match(/\bclass=["']([^"']*)["']/i)||[])[1]||'';
+        const id = (tag.match(/\bid=["']([^"']*)["']/i)||[])[1]||'';
+        allImgs.push({ src: best, alt, class: cls, id });
       }
-      const logoPatterns = [
-        i => /logo/i.test(i.alt) || /logo/i.test(i.class) || /logo/i.test(i.src),
-        i => /brand|marca|header/i.test(i.class),
-        i => /navbar|nav-brand/i.test(i.class)
+      console.log('IMG tags found: ' + allImgs.length);
+
+      // --- CSS background-image URLs from inline styles ---
+      const bgRe = /background(?:-image)?\s*:[^;]*url\(["']?([^"')]+)["']?\)/gi;
+      let bgM;
+      while ((bgM = bgRe.exec(rawHtml)) !== null) {
+        let bgSrc = resolveUrl(bgM[1], baseUrl);
+        if (bgSrc && !bgSrc.includes('gradient') && !bgSrc.includes('data:image/svg') && bgSrc.match(/\.(jpg|jpeg|png|webp|avif)/i)) {
+          bgImages.push(bgSrc);
+        }
+      }
+      // --- data-bg and data-bg-multi (used by some lazy load plugins) ---
+      const dataBgRe = /data-bg=["']([^"']+)["']/gi;
+      while ((bgM = dataBgRe.exec(rawHtml)) !== null) {
+        bgImages.push(resolveUrl(bgM[1], baseUrl));
+      }
+      // --- Elementor data-settings with background_image ---
+      const settingsRe = /data-settings='([^']+)'/gi;
+      while ((bgM = settingsRe.exec(rawHtml)) !== null) {
+        try {
+          const s = JSON.parse(bgM[1].replace(/&quot;/g,'"'));
+          if (s.background_image && s.background_image.url) bgImages.push(s.background_image.url);
+        } catch(e) {}
+      }
+      console.log('CSS/data-bg images found: ' + bgImages.length);
+
+      // --- Detect logo ---
+      const logoPats = [
+        i => /logo/i.test(i.id),
+        i => /logo/i.test(i.src),
+        i => /logo/i.test(i.alt) || /logo/i.test(i.class),
+        i => /brand|marca|custom-logo|site-logo/i.test(i.class),
+        i => /wp-image/i.test(i.class) && /header/i.test(i.class),
       ];
-      for (const pattern of logoPatterns) {
-        const found = all.find(pattern);
-        if (found) { logoUrl = found.src; break; }
+      for (const p of logoPats) {
+        const f = allImgs.find(p);
+        if (f) { logoUrl = f.src; console.log('Logo via pattern: ' + logoUrl.substring(0,120)); break; }
       }
       if (!logoUrl) {
         const hm = rawHtml.match(/<header[\s\S]*?<\/header>/i);
         if (hm) {
-          const hi = hm[0].match(/<img[^>]+src=["']([^"']+)["']/i);
-          if (hi) {
-            let s = hi[1];
-            if (s.startsWith('//')) s = 'https:' + s;
-            else if (s.startsWith('/')) s = baseUrl + s;
-            else if (!s.startsWith('http')) s = baseUrl + '/' + s;
-            logoUrl = s;
-          }
+          const hi = hm[0].match(/(?:data-src|src)=["']([^"']+(?:logo|brand)[^"']*)["']/i)
+            || hm[0].match(/(?:data-src|src)=["'](https?:\/\/[^"']+\.(?:png|jpg|jpeg|svg|webp))["']/i);
+          if (hi) { logoUrl = resolveUrl(hi[1], baseUrl); console.log('Logo in header: ' + logoUrl.substring(0,120)); }
         }
+      }
+      if (!logoUrl) {
+        const ogImg = rawHtml.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+          || rawHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+        if (ogImg) { logoUrl = resolveUrl(ogImg[1], baseUrl); console.log('Logo via og:image: ' + logoUrl.substring(0,120)); }
       }
       if (!logoUrl) {
         const fm = rawHtml.match(/<link[^>]+rel=["'](?:icon|apple-touch-icon|shortcut icon)["'][^>]+href=["']([^"']+)["']/i)
           || rawHtml.match(/<link[^>]+href=["']([^"']+)["'][^>]+rel=["'](?:icon|apple-touch-icon)["']/i);
-        if (fm) {
-          let s = fm[1];
-          if (s.startsWith('//')) s = 'https:' + s;
-          else if (s.startsWith('/')) s = baseUrl + s;
-          else if (!s.startsWith('http')) s = baseUrl + '/' + s;
-          logoUrl = s;
-        }
+        if (fm) { logoUrl = resolveUrl(fm[1], baseUrl); console.log('Logo via favicon: ' + logoUrl.substring(0,120)); }
       }
-      images = all
-        .filter(i => i.src !== logoUrl)
-        .filter(i => !i.src.includes('icon') && !i.src.includes('favicon'))
-        .filter(i => !i.src.includes('banner') && !i.src.includes('advert'))
-        .filter(i => i.src.match(/\.(jpg|jpeg|png|webp)/i) || i.src.includes('image'))
-        .slice(0, 6)
-        .map(i => i.src);
-    }
+      console.log('LOGO: ' + (logoUrl || 'NONE'));
 
+      // --- Company photos: combine img tags + bg images, exclude logo ---
+      let allPhotos = allImgs
+        .filter(i => i.src !== logoUrl)
+        .filter(i => !i.src.includes('icon') && !i.src.includes('favicon') && !i.src.includes('emoji') && !i.src.includes('avatar'))
+        .filter(i => !i.src.includes('advert') && !i.src.includes('widget') && !i.src.includes('logo'))
+        .filter(i => !i.src.startsWith('data:'))
+        .filter(i => i.src.match(/\.(jpg|jpeg|png|webp|avif)/i) || i.src.includes('wp-content/uploads') || i.src.includes('image'))
+        .map(i => i.src);
+      // Add CSS background images too
+      bgImages.forEach(bg => {
+        if (!allPhotos.includes(bg) && bg !== logoUrl) allPhotos.push(bg);
+      });
+      // Remove duplicates
+      allPhotos = [...new Set(allPhotos)];
+    }
+    const images = allPhotos ? allPhotos.slice(0, 6) : [];
+    console.log('Final photos: ' + images.length);
+    images.forEach((img, i) => console.log('  [' + i + '] ' + img.substring(0, 120)));
+
+    // 3. CSS colors
     let cssColors = [];
     if (rawHtml) {
-      const cm2 = rawHtml.match(/#[0-9a-fA-F]{6}/g) || [];
+      const cm2 = rawHtml.match(/#[0-9a-fA-F]{6}/g)||[];
       const cc = {};
-      cm2.forEach(c => {
-        const l = c.toLowerCase();
-        if (['#ffffff','#000000','#f5f5f5','#333333','#e5e5e5','#cccccc','#eeeeee'].includes(l)) return;
-        cc[l] = (cc[l] || 0) + 1;
-      });
-      cssColors = Object.entries(cc).sort((a, b) => b[1] - a[1]).slice(0, 5).map(e => e[0]);
+      cm2.forEach(c => { const l=c.toLowerCase(); if(['#ffffff','#000000','#f5f5f5','#333333','#e5e5e5','#cccccc','#eeeeee','#f8f8f8','#fafafa'].includes(l))return; cc[l]=(cc[l]||0)+1; });
+      cssColors = Object.entries(cc).sort((a,b)=>b[1]-a[1]).slice(0,5).map(e=>e[0]);
     }
 
+    // 4. OpenAI
     const oRes = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + OPENAI_KEY },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: 'Extrae datos de empresa de servicios desde su web. JSON: {"companyName":"","brandName":"","cif":"","phone":"","email":"","address":"","website":"' + url + '","slogan":"","sector":"mudanzas|limpiezas|reformas|instalaciones|jardineria|eventos|general","services":[],"zones":[],"colors":{"primary":"#hex","accent":"#hex"},"contractClauses":[],"legalText":""}. Sector DEBE ser uno de los listados. Colores CSS encontrados: ' + cssColors.join(', ')
-          },
-          { role: 'user', content: 'Analiza: ' + url + '\n\n' + pageText }
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+OPENAI_KEY},
+      body: JSON.stringify({ model:'gpt-4o-mini', temperature:0.2, response_format:{type:'json_object'},
+        messages:[
+          { role:'system', content:'Extrae datos de empresa de servicios desde su web. JSON: {"companyName":"","brandName":"","cif":"","phone":"","email":"","address":"","website":"'+url+'","slogan":"","sector":"mudanzas|limpiezas|reformas|instalaciones|jardineria|eventos|general","services":[],"zones":[],"colors":{"primary":"#hex","accent":"#hex"},"contractClauses":[],"legalText":""}. Sector DEBE ser uno de los listados. Colores CSS: '+cssColors.join(', ') },
+          { role:'user', content:'Analiza: '+url+'\n\n'+pageText }
         ]
       })
     });
-    if (!oRes.ok) {
-      const e = await oRes.text();
-      return res.status(502).json({ error: 'Error IA', details: e });
-    }
+    if (!oRes.ok) { const e=await oRes.text(); return res.status(502).json({error:'Error IA',details:e}); }
     const aiData = await oRes.json();
     const result = JSON.parse(aiData.choices[0].message.content);
 
@@ -179,25 +224,26 @@ app.post('/api/ai-config', async (req, res) => {
     result.images = images;
     result.cssColors = cssColors;
 
-    console.log('Downloading images as base64...');
-    result.logoBase64 = logoUrl ? (await downloadImageAsBase64(logoUrl)) || '' : '';
-    console.log('Logo: ' + (result.logoBase64 ? 'OK' : 'FAILED'));
+    // 5. Download as base64
+    console.log('\n--- Downloading base64 ---');
+    result.logoBase64 = logoUrl ? (await downloadImageAsBase64(logoUrl, fullUrl)) || '' : '';
+    console.log('Logo: ' + (result.logoBase64 ? 'OK' : 'NONE'));
 
     result.imagesBase64 = [];
     for (let i = 0; i < Math.min(images.length, 3); i++) {
-      const b64 = await downloadImageAsBase64(images[i]);
+      const b64 = await downloadImageAsBase64(images[i], fullUrl);
       result.imagesBase64.push(b64 || '');
-      console.log('Image ' + (i+1) + ': ' + (b64 ? 'OK' : 'FAILED'));
+      console.log('Img' + (i+1) + ': ' + (b64 ? 'OK' : 'FAIL'));
     }
 
-    console.log('/api/ai-config OK - ' + (result.companyName || url));
+    console.log('=== DONE: ' + (result.companyName||url) + ' | Logo:' + (result.logoBase64?'YES':'NO') + ' | Photos:' + result.imagesBase64.filter(Boolean).length + ' ===\n');
     res.json(result);
-  } catch (err) {
-    console.error('/api/ai-config error:', err.message);
-    res.status(500).json({ error: 'Error interno', details: err.message });
+  } catch(err) {
+    console.error('AI-CONFIG ERROR:', err.message);
+    res.status(500).json({ error:'Error interno', details:err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log('WHITELABEL API v1.1 | Port: ' + PORT + ' | OpenAI: ' + (process.env.OPENAI_API_KEY ? 'OK' : 'MISSING'));
+  console.log('WHITELABEL API v1.2 | Port:' + PORT + ' | OpenAI:' + (process.env.OPENAI_API_KEY?'OK':'MISSING'));
 });

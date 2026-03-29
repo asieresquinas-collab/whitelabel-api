@@ -1,0 +1,16 @@
+{
+  "name": "whitelabel-api-server",
+  "version": "1.0.0",
+  "description": "API Backend para la app White-Label de Presupuestos Pro — 100% independiente de Azkar",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}

@@ -1,16 +1,39 @@
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3002;
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
+app.use(express.text({ limit: '5mb', type: 'text/html' }));
+
+// === IN-MEMORY APP HTML ===
+let appHtml = '<h1>Presupuestos Pro</h1><p>Cargando app... POST /api/set-app para subir la app.</p>';
+// Try to load from disk on startup
+try {
+  const f = path.join(__dirname, 'index.html');
+  if (fs.existsSync(f)) { appHtml = fs.readFileSync(f, 'utf8'); console.log('Loaded index.html from disk'); }
+} catch(e) {}
 
 app.get('/api/ping', (req, res) => {
-  res.json({ status: 'ok', server: 'whitelabel-api', version: '1.2.1' });
+  res.json({ status: 'ok', server: 'whitelabel-api', version: '1.4.0' });
 });
 
 app.get('/', (req, res) => {
-  res.send('<h1>WhiteLabel API Server v1.2</h1><p>POST /api/ai-config | POST /api/proxy-image | GET /api/ping</p>');
+  res.type('html').send(appHtml);
+});
+
+// === UPLOAD APP HTML ===
+app.post('/api/set-app', (req, res) => {
+  try {
+    const html = req.body;
+    if (!html || html.length < 100) return res.status(400).json({ error: 'HTML demasiado corto' });
+    appHtml = html;
+    try { fs.writeFileSync(path.join(__dirname, 'index.html'), html, 'utf8'); } catch(e) {}
+    console.log('APP HTML updated: ' + html.length + ' chars');
+    res.json({ ok: true, size: html.length });
+  } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
 // === HELPER: download image as base64 ===
@@ -245,5 +268,5 @@ app.post('/api/ai-config', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log('WHITELABEL API v1.2.1 | Port:' + PORT + ' | OpenAI:' + (process.env.OPENAI_API_KEY?'OK':'MISSING'));
+  console.log('WHITELABEL API v1.4.0 | Port:' + PORT + ' | OpenAI:' + (process.env.OPENAI_API_KEY?'OK':'MISSING'));
 });

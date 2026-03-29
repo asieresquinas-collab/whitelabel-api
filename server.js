@@ -1,3 +1,4 @@
+server.js
 const express = require('express');
 const cors = require('cors');
 const app = express();
@@ -6,7 +7,7 @@ app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 
 app.get('/api/ping', (req, res) => {
-  res.json({ status: 'ok', server: 'whitelabel-api', version: '1.2.0' });
+  res.json({ status: 'ok', server: 'whitelabel-api', version: '1.2.1' });
 });
 
 app.get('/', (req, res) => {
@@ -88,7 +89,7 @@ app.post('/api/ai-config', async (req, res) => {
     } catch(e) { console.warn('Page fetch failed: ' + e.message); pageText = 'No se pudo acceder a ' + url; }
 
     // 2. Extract ALL images: <img> tags + CSS background-images + data-bg
-    let allImgs = [], logoUrl = '', bgImages = [];
+    let allImgs = [], logoUrl = '', bgImages = [], allPhotos = [];
     if (rawHtml) {
       // --- IMG tags (with data-src, data-lazy-src, srcset support) ---
       const imgRe = /<img[^>]*>/gi;
@@ -178,7 +179,7 @@ app.post('/api/ai-config', async (req, res) => {
       console.log('LOGO: ' + (logoUrl || 'NONE'));
 
       // --- Company photos: combine img tags + bg images, exclude logo ---
-      let allPhotos = allImgs
+      allPhotos = allImgs
         .filter(i => i.src !== logoUrl)
         .filter(i => !i.src.includes('icon') && !i.src.includes('favicon') && !i.src.includes('emoji') && !i.src.includes('avatar'))
         .filter(i => !i.src.includes('advert') && !i.src.includes('widget') && !i.src.includes('logo'))
@@ -192,7 +193,7 @@ app.post('/api/ai-config', async (req, res) => {
       // Remove duplicates
       allPhotos = [...new Set(allPhotos)];
     }
-    const images = allPhotos ? allPhotos.slice(0, 6) : [];
+    const images = allPhotos.slice(0, 6);
     console.log('Final photos: ' + images.length);
     images.forEach((img, i) => console.log('  [' + i + '] ' + img.substring(0, 120)));
 
@@ -245,5 +246,5 @@ app.post('/api/ai-config', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log('WHITELABEL API v1.2 | Port:' + PORT + ' | OpenAI:' + (process.env.OPENAI_API_KEY?'OK':'MISSING'));
+  console.log('WHITELABEL API v1.2.1 | Port:' + PORT + ' | OpenAI:' + (process.env.OPENAI_API_KEY?'OK':'MISSING'));
 });
